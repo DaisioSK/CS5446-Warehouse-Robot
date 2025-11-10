@@ -1,0 +1,14 @@
+
+non-fluents pp_nf_15x10_basic {
+  domain = warehouse_pickplace;
+  objects { pos : {0..14}; }
+  non-fluents {
+    H = 15;  W = 10;
+    A_X = 2;  A_Y = 1;
+    B_X = 13; B_Y = 8;
+    OBSTACLE(1,4) = true;  OBSTACLE(1,5) = true;
+    OBSTACLE(4,4) = true;  OBSTACLE(5,4) = true;  OBSTACLE(6,4) = true;
+    OBSTACLE(8,2) = true;  OBSTACLE(8,3) = true;  OBSTACLE(8,4) = true;  OBSTACLE(8,5) = true;
+    OBSTACLE(10,6) = true; OBSTACLE(11,6) = true; OBSTACLE(12,6) = true;
+  }
+}

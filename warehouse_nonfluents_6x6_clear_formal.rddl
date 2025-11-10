@@ -1,0 +1,15 @@
+
+////////////////////////////////////////////////////////////////////
+// Non-Fluents: 6x6 (Empty Map)
+////////////////////////////////////////////////////////////////////
+non-fluents warehouse_6x6_clear {
+    domain = warehouse_grid_mdp;
+
+    objects { pos : {0..5}; }
+
+    non-fluents {
+        H = 6;  W = 6;
+        GOAL_X = 5;  GOAL_Y = 5;
+        // Empty map: no OBSTACLE declarations
+    }
+}

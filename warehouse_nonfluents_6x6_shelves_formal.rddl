@@ -1,0 +1,38 @@
+
+////////////////////////////////////////////////////////////////////
+// Non-Fluents: 6x6 (Shelves Layout)
+////////////////////////////////////////////////////////////////////
+non-fluents warehouse_6x6_shelves {
+    domain = warehouse_grid_mdp;
+
+    objects { pos : {0..5}; }
+
+    non-fluents {
+        H = 6;  W = 6;
+        GOAL_X = 5;  GOAL_Y = 5;
+
+        // Layout (0=free, 1=obstacle), rows 0..5:
+        // row 0: [0,0,0,0,0,0]
+        // row 1: [1,1,0,1,1,0]
+        OBSTACLE(1,0) = true;
+        OBSTACLE(1,1) = true;
+        OBSTACLE(1,3) = true;
+        OBSTACLE(1,4) = true;
+
+        // row 2: [0,0,0,0,1,0]
+        OBSTACLE(2,4) = true;
+
+        // row 3: [0,1,1,0,1,0]
+        OBSTACLE(3,1) = true;
+        OBSTACLE(3,2) = true;
+        OBSTACLE(3,4) = true;
+
+        // row 4: [0,0,0,0,0,0]
+
+        // row 5: [0,1,1,1,1,0]
+        OBSTACLE(5,1) = true;
+        OBSTACLE(5,2) = true;
+        OBSTACLE(5,3) = true;
+        OBSTACLE(5,4) = true;
+    }
+}

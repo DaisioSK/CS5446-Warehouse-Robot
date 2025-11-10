@@ -1,0 +1,126 @@
+
+////////////////////////////////////////////////////////////////////
+// Warehouse Grid MDP (6x6-ready)
+//
+// Author: Team (NUS SoC) 
+// Date  : 2025-11-06
+//
+// Description:
+//   Minimal single-agent warehouse navigation on a 2D grid.
+//   - Grid cells: 0 = free, 1 = obstacle (shelves/walls)
+//   - Actions   : move_north, move_south, move_west, move_east
+//   - Goal      : reach (GOAL_X, GOAL_Y)
+//   - Reward    : step -0.01; closer +0.05; farther -0.05; bump -0.02; goal +1.0
+//
+// Notes:
+//   This domain mirrors the team's Python Gym env to keep experiments
+//   consistent across planners and RL.
+//
+////////////////////////////////////////////////////////////////////
+domain warehouse_grid_mdp {
+
+    ////////////////////////////////
+    // Types
+    ////////////////////////////////
+    types { pos : int; }
+
+    ////////////////////////////////
+    // Parameterized Variables
+    ////////////////////////////////
+    pvariables {
+
+        // ----- Non-fluents (map + constants) -----
+        OBSTACLE(x: pos, y: pos) : { bool, non-fluent };
+        H : { int, non-fluent };
+        W : { int, non-fluent };
+        GOAL_X : { pos, non-fluent };
+        GOAL_Y : { pos, non-fluent };
+
+        // ----- State fluents -----
+        agent_x : { pos, state-fluent };
+        agent_y : { pos, state-fluent };
+
+        // ----- Action fluents (choose at most one per step) -----
+        move_north : { bool, action-fluent };
+        move_south : { bool, action-fluent };
+        move_west  : { bool, action-fluent };
+        move_east  : { bool, action-fluent };
+    }
+
+    ////////////////////////////////
+    // CPF (Transition Dynamics)
+    ////////////////////////////////
+    cpfs {
+
+        // X transition
+        agent_x' =
+            if (move_north & agent_x > 0 & !OBSTACLE(agent_x-1, agent_y)) then agent_x - 1
+            else if (move_south & agent_x < H-1 & !OBSTACLE(agent_x+1, agent_y)) then agent_x + 1
+            else agent_x;
+
+        // Y transition
+        agent_y' =
+            if (move_west & agent_y > 0 & !OBSTACLE(agent_x, agent_y-1)) then agent_y - 1
+            else if (move_east & agent_y < W-1 & !OBSTACLE(agent_x, agent_y+1)) then agent_y + 1
+            else agent_y;
+    }
+
+    ////////////////////////////////
+    // Reward Function
+    ////////////////////////////////
+    // Mirror Python env shaping:
+    //   step -0.01
+    //   closer +0.05 (if next manhattan < current manhattan)
+    //   farther -0.05 (if next manhattan > current manhattan)
+    //   bump -0.02   (tried move but position unchanged)
+    //   goal +1.0    (if reach goal)
+    reward =
+
+        // base step penalty
+        -0.01
+
+        // distance delta (Manhattan comparison)
+        + (
+            // if current-dist > next-dist -> got closer -> +0.05
+            (
+                ((agent_x >= GOAL_X) ? (agent_x - GOAL_X) : (GOAL_X - agent_x))
+                +
+                ((agent_y >= GOAL_Y) ? (agent_y - GOAL_Y) : (GOAL_Y - agent_y))
+            )
+            >
+            (
+                ((agent_x' >= GOAL_X) ? (agent_x' - GOAL_X) : (GOAL_X - agent_x'))
+                +
+                ((agent_y' >= GOAL_Y) ? (agent_y' - GOAL_Y) : (GOAL_Y - agent_y'))
+            )
+            ? 0.05
+            : (
+                // if current-dist < next-dist -> got farther -> -0.05
+                (
+                    ((agent_x >= GOAL_X) ? (agent_x - GOAL_X) : (GOAL_X - agent_x))
+                    +
+                    ((agent_y >= GOAL_Y) ? (agent_y - GOAL_Y) : (GOAL_Y - agent_y))
+                )
+                <
+                (
+                    ((agent_x' >= GOAL_X) ? (agent_x' - GOAL_X) : (GOAL_X - agent_x'))
+                    +
+                    ((agent_y' >= GOAL_Y) ? (agent_y' - GOAL_Y) : (GOAL_Y - agent_y'))
+                )
+                ? -0.05 : 0.0
+            )
+        )
+
+        // bump penalty: tried to move (any direction) but stayed
+        + (
+            ((agent_x' == agent_x) & (agent_y' == agent_y) &
+             (move_north | move_south | move_west | move_east))
+            ? -0.02 : 0.0
+        )
+
+        // success bonus: reached the goal
+        + (
+            ((agent_x' == GOAL_X) & (agent_y' == GOAL_Y))
+            ? 1.0 : 0.0
+        );
+}

@@ -1,0 +1,22 @@
+
+////////////////////////////////////////////////////////////////////
+// Instance: single-agent 6x6
+////////////////////////////////////////////////////////////////////
+instance warehouse_inst_6x6 {
+    domain = warehouse_grid_mdp;
+
+    // Choose map:
+    // non-fluents = warehouse_6x6_clear;
+    non-fluents = warehouse_6x6_shelves;
+
+    init-state {
+        agent_x = 0;
+        agent_y = 0;
+    }
+
+    // one action per step
+    max-nondef-actions = 1;
+
+    horizon  = 200;
+    discount = 1.0;
+}

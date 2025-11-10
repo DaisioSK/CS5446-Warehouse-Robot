@@ -1,0 +1,12 @@
+
+instance pp_inst_15x10 {
+  domain = warehouse_pickplace;
+  non-fluents = pp_nf_15x10_basic;
+  init-state {
+    agent_x = 1; agent_y = 1;
+    carry = false; delivered = false;
+  }
+  max-nondef-actions = 1;
+  horizon = 400;
+  discount = 1.0;
+}
