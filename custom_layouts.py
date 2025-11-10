@@ -99,12 +99,20 @@ def _parse_layout(config: LayoutConfig) -> Dict[str, object]:
 
 
 def inflate_obstacles(obstacles: Iterable[Coord], H: int, W: int, radius: int) -> List[Coord]:
+    """Inflate obstacles using Manhattan distance (4-neighborhood).
+
+    This avoids the overly aggressive 8-neighborhood (square) dilation that can
+    overfill corridors for radius=1. With manhattan inflation, the corridor
+    widens to a cross shape of width (2*radius+1) without diagonals.
+    """
     if radius <= 0:
         return sorted(set(obstacles))
     inflated: Set[Coord] = set()
     for x, y in obstacles:
         for dx in range(-radius, radius + 1):
             for dy in range(-radius, radius + 1):
+                if abs(dx) + abs(dy) > radius:
+                    continue
                 nx, ny = x + dx, y + dy
                 if 0 <= nx < H and 0 <= ny < W:
                     inflated.add((nx, ny))
@@ -118,7 +126,10 @@ def make_enhanced_nonfl(config: LayoutConfig = ENHANCED_WAREHOUSE, inflation_rad
     _validate_ascii(config)
     parsed = _parse_layout(config)
     H, W = parsed["H"], parsed["W"]
-    obstacles = inflate_obstacles(parsed["obstacles"], H, W, inflation_radius)
+    # Inflate shelves but keep semantic zones traversable (never turn zones into obstacles)
+    inflated = set(inflate_obstacles(parsed["obstacles"], H, W, inflation_radius))
+    zone_cells = set(sum(parsed["zones"].values(), [])) if parsed.get("zones") else set()
+    obstacles = sorted([xy for xy in inflated if xy not in zone_cells])
     nonfl = {
         "H": H,
         "W": W,

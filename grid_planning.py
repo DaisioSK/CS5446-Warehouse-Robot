@@ -14,9 +14,9 @@ try:
     import matplotlib.patheffects as pe
     import matplotlib.pyplot as plt
     from matplotlib.animation import PillowWriter
-    from matplotlib.patches import FancyArrowPatch, Patch
+    from matplotlib.patches import FancyArrowPatch, Patch, Rectangle
 except ImportError:  # pragma: no cover - plotting disabled outside notebook env
-    pe = plt = PillowWriter = FancyArrowPatch = Patch = None
+    pe = plt = PillowWriter = FancyArrowPatch = Patch = Rectangle = None
 
 Action = Tuple[int, int, str]
 ACTIONS: List[Action] = [
@@ -316,6 +316,287 @@ def plot_staged_path(
 
     plt.show()
 
+
+# A staged-style multi-agent plot, reusing plot_staged_path semantics
+def plot_multiagent_staged(
+    nonfl: Dict[str, object],
+    paths: List[Optional[List[Tuple[int, int]]]],
+    labels: Optional[List[str]] = None,
+    title: str = "Multi-agent plan (staged style)",
+    annotate_every: int = 5,
+) -> None:
+    """Plot multiple agent paths using the same visual style as plot_staged_path.
+
+    Each agent path is mapped to a segment with its own color and slight
+    positional offset, and timestamps are sparsely annotated according to
+    annotate_every.
+    """
+    # Palette is short on purpose; it will cycle for many agents
+    palette = [
+        "deepskyblue",
+        "tomato",
+        "mediumseagreen",
+        "gold",
+        "orchid",
+        "dodgerblue",
+        "darkorange",
+    ]
+
+    segs: List[Dict[str, object]] = []
+    for k, path in enumerate(paths):
+        if not path or len(path) < 2:
+            continue
+        label = labels[k] if labels and k < len(labels) else f"agent{k}"
+        color = palette[k % len(palette)]
+        off = _agent_offset(k)
+        segs.append({
+            "label": label,
+            "path": path,
+            "color": color,
+            "offset": off,
+        })
+    if not segs:
+        _require_matplotlib()
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.set_title(title)
+        ax.text(0.5, 0.5, "No paths", transform=ax.transAxes, ha="center", va="center")
+        plt.show()
+        return
+    plot_staged_path(nonfl, segs, title=title, annotate_every=annotate_every)
+
+def _draw_zone_patches(ax, nonfl: Dict[str, object], legend_items: List[Patch]) -> None:
+    zones = nonfl.get("zones") or {}
+    if Rectangle is None:
+        return
+    # Draw shelves (obstacles) as solid yellow blocks
+    for (x, y) in nonfl.get("obstacles", []) or []:
+        ax.add_patch(Rectangle((y - 0.5, x - 0.5), 1.0, 1.0, facecolor="#f0d95a", alpha=0.9, edgecolor="black", linewidth=0.4))
+    legend_items.append(Patch(facecolor="#f0d95a", edgecolor="black", linewidth=0.5, label="Shelf"))
+    styles = {
+        "inbound": ("tab:blue", 0.35, "Inbound"),
+        "packing": ("darkorange", 0.35, "Packing"),
+        "outbound": ("tab:red", 0.35, "Outbound"),
+        "charging": ("tab:green", 0.35, "Charging"),
+    }
+    for key, cells in zones.items():
+        if key not in styles:
+            continue
+        color, alpha, label = styles[key]
+        for (x, y) in cells:
+            ax.add_patch(Rectangle((y - 0.5, x - 0.5), 1.0, 1.0, facecolor=color, alpha=alpha, edgecolor="black", linewidth=0.4))
+        legend_items.append(Patch(facecolor=color, alpha=0.35, edgecolor="black", linewidth=0.5, label=label))
+
+
+def plot_routes_unified(
+    nonfl: Dict[str, object],
+    agents_segments: List[List[Dict[str, object]]],
+    title: str = "Routes (unified)",
+    annotate_every: int = 5,
+    figsize: Tuple[float, float] = (9.5, 7.0),
+) -> None:
+    """Unified visualization inspired by plot_staged_path.
+
+    - Background: grid + zone color patches + one-way arrows
+    - Per-agent: slight offset to avoid overlap
+    - Per-segment: different linestyles to distinguish phases (e.g., S->P vs P->D)
+    - Labels: sparse time indices every k steps, with agent/task prefixes
+    - Legend placed outside to avoid occlusion
+    """
+    _require_matplotlib()
+    H, W = nonfl.get("H"), nonfl.get("W")
+    grid = build_grid(nonfl)
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.imshow(grid, cmap="cividis", alpha=0.85)
+    ax.set_title(title)
+    ax.set_xticks(range(W))
+    ax.set_yticks(range(H))
+    ax.set_xlabel("y")
+    ax.set_ylabel("x")
+    ax.set_xlim(-0.5, W - 0.5)
+    ax.set_ylim(H - 0.5, -0.5)
+
+    legend_items: List[Patch] = []
+    _draw_zone_patches(ax, nonfl, legend_items)
+    if nonfl.get("one_way_edges"):
+        legend_items.append(Patch(facecolor="none", edgecolor="none", label="One-way"))
+    _draw_one_way_edges(ax, nonfl.get("one_way_edges", []))
+
+    palette = [
+        "deepskyblue",
+        "tomato",
+        "mediumseagreen",
+        "gold",
+        "orchid",
+        "dodgerblue",
+        "darkorange",
+    ]
+    ls_for_phase = {"SP": "--", "PD": "-", "GEN": "-"}
+    phase_legend_added = set()
+    agent_handles = {}
+
+    for aidx, segs in enumerate(agents_segments):
+        color = palette[aidx % len(palette)]
+        dx, dy = _agent_offset(aidx)
+        for seg in segs:
+            path = seg.get("path")
+            if not path or len(path) < 2:
+                continue
+            phase = seg.get("phase", "GEN")
+            ls = seg.get("linestyle") or ls_for_phase.get(phase, "-")
+            task_idx = seg.get("task", 0)
+            xs = [x + dx for (x, y) in path]
+            ys = [y + dy for (x, y) in path]
+            line = ax.plot(ys, xs, ls, linewidth=2.6, color=color, alpha=0.96)[0]
+            ax.scatter(ys, xs, s=26, color=color, alpha=0.8, edgecolors="white", linewidths=0.5)
+
+            if aidx not in agent_handles:
+                agent_handles[aidx] = line
+
+            for t, (x, y) in enumerate(path):
+                if not annotate_every:
+                    continue
+                if t in (0, len(path) - 1) or (t % annotate_every == 0):
+                    txt = f"A{aidx}T{task_idx}:{t}"
+                    ax.text(
+                        y + dy,
+                        x + dx,
+                        txt,
+                        color="white",
+                        fontsize=8.5,
+                        ha="center",
+                        va="center",
+                        path_effects=[pe.withStroke(linewidth=2.3, foreground="black")],
+                    )
+
+            key = (phase, ls)
+            if key not in phase_legend_added:
+                legend_items.append(Patch(facecolor="none", edgecolor="black", label=("S→P" if phase == "SP" else ("P→D" if phase == "PD" else phase)), linewidth=2.6))
+                phase_legend_added.add(key)
+
+    agent_list = sorted(agent_handles.items())
+    agent_lines = [h for _, h in agent_list]
+    agent_labels = [f"A{idx}" for idx, _ in agent_list]
+    if agent_lines:
+        lg1 = ax.legend(agent_lines, agent_labels, loc="upper left", bbox_to_anchor=(1.02, 1.0), framealpha=0.9, title="Agents")
+        ax.add_artist(lg1)
+
+    if legend_items:
+        lg2 = ax.legend(handles=legend_items, loc="upper left", bbox_to_anchor=(1.02, 0.42), framealpha=0.9, title="Layers")
+        ax.add_artist(lg2)
+
+    fig.subplots_adjust(right=0.78)
+    plt.show()
+
+
+def animate_routes_unified_gif(
+    nonfl: Dict[str, object],
+    agents_segments: List[List[Dict[str, object]]],
+    out_gif: str = "routes_unified.gif",
+    fps: int = 1,
+    annotate_every: int = 5,
+    figsize: Tuple[float, float] = (9.5, 7.0),
+) -> None:
+    _require_matplotlib()
+    if PillowWriter is None:
+        raise ImportError("matplotlib PillowWriter is required for GIF export")
+    H, W = nonfl.get("H"), nonfl.get("W")
+    grid = build_grid(nonfl)
+
+    # Compute per-agent concatenated lengths to decide total T
+    def concat_len(segs: List[Dict[str, object]]) -> int:
+        total = 0
+        for seg in segs:
+            p = seg.get("path") or []
+            if len(p) >= 2:
+                total += len(p) - 1
+        return total
+
+    T = 0
+    for segs in agents_segments:
+        T = max(T, concat_len(segs))
+
+    palette = [
+        "deepskyblue",
+        "tomato",
+        "mediumseagreen",
+        "gold",
+        "orchid",
+        "dodgerblue",
+        "darkorange",
+    ]
+    ls_for_phase = {"SP": "--", "PD": "-", "GEN": "-"}
+    head_markers = ["o", "^", "s", "X", "D", "P"]  # circle, triangle, square, cross, diamond, plus-filled
+
+    fig, ax = plt.subplots(figsize=figsize)
+    writer = PillowWriter(fps=fps)
+    with writer.saving(fig, out_gif, dpi=120):
+        for t in range(T + 1):
+            ax.clear()
+            ax.imshow(grid, cmap="cividis", alpha=0.85)
+            ax.set_title(f"t = {t}")
+            ax.set_xticks(range(W))
+            ax.set_yticks(range(H))
+            ax.set_xlabel("y")
+            ax.set_ylabel("x")
+            ax.set_xlim(-0.5, W - 0.5)
+            ax.set_ylim(H - 0.5, -0.5)
+
+            legend_items: List[Patch] = []
+            _draw_zone_patches(ax, nonfl, legend_items)
+            if nonfl.get("one_way_edges"):
+                legend_items.append(Patch(facecolor="none", edgecolor="none", label="One-way"))
+            _draw_one_way_edges(ax, nonfl.get("one_way_edges", []))
+
+            for aidx, segs in enumerate(agents_segments):
+                color = palette[aidx % len(palette)]
+                dx, dy = _agent_offset(aidx)
+                elapsed = 0
+                for seg in segs:
+                    p = seg.get("path") or []
+                    if len(p) < 2:
+                        continue
+                    phase = seg.get("phase", "GEN")
+                    ls = ls_for_phase.get(phase, "-")
+                    Tseg = len(p) - 1
+                    upto = max(0, min(Tseg, t - elapsed))
+                    if upto > 0:
+                        xs = [x + dx for (x, y) in p[: upto + 1]]
+                        ys = [y + dy for (x, y) in p[: upto + 1]]
+                        ax.plot(ys, xs, ls, linewidth=2.6, color=color, alpha=0.96)
+                        # draw agent head at current position with distinctive marker
+                        m = head_markers[aidx % len(head_markers)]
+                        ax.scatter(
+                            ys[-1:],
+                            xs[-1:],
+                            s=70,
+                            marker=m,
+                            edgecolors="white",
+                            linewidths=1.2,
+                            c=[color],
+                            zorder=4,
+                        )
+                        # sparse labels along the drawn part
+                        if annotate_every:
+                            for i in range(0, upto + 1):
+                                if i in (0, upto) or (i % annotate_every == 0):
+                                    x, y = p[i]
+                                    ax.text(
+                                        y + dy,
+                                        x + dx,
+                                        f"A{aidx}:{elapsed + i}",
+                                        color="white",
+                                        fontsize=8.5,
+                                        ha="center",
+                                        va="center",
+                                        path_effects=[pe.withStroke(linewidth=2.3, foreground="black")],
+                                    )
+                    elapsed += Tseg
+
+            if legend_items:
+                ax.legend(handles=legend_items, loc="upper left", bbox_to_anchor=(1.02, 0.42), framealpha=0.9)
+                fig.subplots_adjust(right=0.78)
+            writer.grab_frame()
+    print(f"Saved GIF to: {out_gif}")
 
 # ---------- Multi-agent helpers ----------
 ALL_MOVES = [(-1, 0, "N"), (1, 0, "S"), (0, 1, "E"), (0, -1, "W"), (0, 0, "WAIT")]
@@ -694,6 +975,8 @@ __all__ = [
     "reserve_path",
     "multi_agent_sequential",
     "plot_multiple_paths_pretty_offset",
+    "plot_routes_unified",
+    "plot_multiagent_staged",
     "animate_paths_gif",
     "free_cells",
     "auto_pick_starts_goals",

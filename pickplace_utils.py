@@ -511,3 +511,29 @@ __all__ = [
     "plot_explored_heatmap",
     "plot_heuristic_field",
 ]
+
+# --- Additional visualization: open-set touched heatmap ---
+def plot_open_touched_heatmap(nonfl: Dict[str, object], footprint: Dict[str, object], title: str = "A* open touched") -> None:
+    _require_numpy()
+    _require_matplotlib()
+    H, W = nonfl["H"], nonfl["W"]
+    grid = build_grid(nonfl)
+    arr = np.full((H, W), np.nan, dtype=float)
+    for (x, y) in footprint.get("open_touched", set()):
+        if 0 <= x < H and 0 <= y < W:
+            arr[x, y] = 1.0
+    import matplotlib.pyplot as plt  # local import to satisfy headless tests
+    fig, ax = plt.subplots(figsize=(6.5, 6.5))
+    ax.imshow(grid, alpha=0.35)
+    im = ax.imshow(arr, cmap="YlGnBu", alpha=0.9)
+    ax.set_title(title)
+    ax.set_xticks(range(W))
+    ax.set_yticks(range(H))
+    ax.set_xlabel("y")
+    ax.set_ylabel("x")
+    ax.set_xlim(-0.5, W - 0.5)
+    ax.set_ylim(H - 0.5, -0.5)
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    plt.show()
+
+__all__.append("plot_open_touched_heatmap")
