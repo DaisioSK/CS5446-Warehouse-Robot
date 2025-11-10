@@ -41,6 +41,21 @@ def build_grid(nonfl: Dict[str, object]) -> List[List[int]]:
     return grid
 
 
+def _draw_one_way_edges(ax, edges):
+    if not edges or FancyArrowPatch is None:
+        return
+    for (x1, y1), (x2, y2) in edges:
+        arrow = FancyArrowPatch(
+            (y1, x1),
+            (y2, x2),
+            arrowstyle="->",
+            mutation_scale=13,
+            color="white",
+            linewidth=1.6,
+        )
+        ax.add_patch(arrow)
+
+
 def plot_grid(
     nonfl: Dict[str, object],
     start_xy: Optional[Tuple[int, int]] = None,
@@ -188,12 +203,18 @@ def path_to_actions(path: List[Tuple[int, int]]) -> List[str]:
     return out
 
 
-def plot_path(nonfl: Dict[str, object], path: Optional[List[Tuple[int, int]]], title: str = "path") -> None:
+def plot_path(
+    nonfl: Dict[str, object],
+    path: Optional[List[Tuple[int, int]]],
+    title: str = "path",
+    color: str = "deepskyblue",
+    annotate_every: int = 5,
+) -> None:
     _require_matplotlib()
     H, W = nonfl.get("H"), nonfl.get("W")
     grid = build_grid(nonfl)
-    fig, ax = plt.subplots(figsize=(4, 4))
-    ax.imshow(grid)
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.imshow(grid, cmap="cividis", alpha=0.85)
     ax.set_title(title)
     ax.set_xticks(range(W))
     ax.set_yticks(range(H))
@@ -201,12 +222,98 @@ def plot_path(nonfl: Dict[str, object], path: Optional[List[Tuple[int, int]]], t
     ax.set_ylabel("x")
     ax.set_xlim(-0.5, W - 0.5)
     ax.set_ylim(H - 0.5, -0.5)
-    if path:
-        for t, (x, y) in enumerate(path):
-            ax.text(y, x, str(t), ha="center", va="center")
-    gx, gy = nonfl.get("GOAL_X"), nonfl.get("GOAL_Y")
-    if isinstance(gx, int) and isinstance(gy, int):
-        ax.text(gy, gx, "G", ha="center", va="center", fontweight="bold")
+
+    if not path:
+        ax.text(0.5, 0.5, "No path", transform=ax.transAxes)
+        plt.show()
+        return
+
+    xs = [x for x, _ in path]
+    ys = [y for _, y in path]
+    ax.plot(ys, xs, "-", linewidth=2.8, color=color, alpha=0.95)
+    ax.scatter(ys, xs, s=28, c=range(len(path)), cmap="plasma", edgecolors="white", linewidths=0.6)
+
+    for idx, (x, y) in enumerate(path):
+        if annotate_every and (idx in (0, len(path) - 1) or idx % annotate_every == 0):
+            txt = "S" if idx == 0 else ("G" if idx == len(path) - 1 else str(idx))
+            ax.text(
+                y,
+                x,
+                txt,
+                color="white",
+                ha="center",
+                va="center",
+                fontsize=9,
+                path_effects=[pe.withStroke(linewidth=2.5, foreground="black")],
+            )
+
+    _draw_one_way_edges(ax, nonfl.get("one_way_edges", []))
+    plt.show()
+
+
+def plot_staged_path(
+    nonfl: Dict[str, object],
+    segments: List[Dict[str, object]],
+    title: str = "staged path",
+    annotate_every: int = 5,
+) -> None:
+    """Plot multiple path segments with per-stage colors and slight offsets."""
+    _require_matplotlib()
+    if not segments:
+        raise ValueError("segments list is empty")
+
+    H, W = nonfl.get("H"), nonfl.get("W")
+    grid = build_grid(nonfl)
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.imshow(grid, cmap="cividis", alpha=0.8)
+    ax.set_title(title)
+    ax.set_xticks(range(W))
+    ax.set_yticks(range(H))
+    ax.set_xlabel("y")
+    ax.set_ylabel("x")
+    ax.set_xlim(-0.5, W - 0.5)
+    ax.set_ylim(H - 0.5, -0.5)
+
+    handles = []
+    labels = []
+    for seg in segments:
+        path = seg.get("path")
+        if not path or len(path) < 2:
+            continue
+        color = seg.get("color", "deepskyblue")
+        label = seg.get("label")
+        dx, dy = seg.get("offset", (0.0, 0.0))
+        xs = [x + dx for x, _ in path]
+        ys = [y + dy for _, y in path]
+        line = ax.plot(ys, xs, "-", linewidth=2.6, color=color, alpha=0.95)[0]
+        ax.scatter(ys, xs, s=26, color=color, alpha=0.7, edgecolors="white", linewidths=0.4)
+        if label:
+            handles.append(line)
+            labels.append(label)
+
+        for idx, (x, y) in enumerate(path):
+            if not annotate_every:
+                continue
+            if idx not in (0, len(path) - 1) and idx % annotate_every != 0:
+                continue
+            txt = f"{label}:{idx}" if label else str(idx)
+            ax.text(
+                y + dy,
+                x + dx,
+                txt,
+                color="white",
+                fontsize=8,
+                ha="center",
+                va="center",
+                path_effects=[pe.withStroke(linewidth=2.2, foreground="black")],
+            )
+
+    _draw_one_way_edges(ax, nonfl.get("one_way_edges", []))
+
+    if handles:
+        ax.legend(handles, labels, loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, framealpha=0.9)
+        fig.subplots_adjust(right=0.78)
+
     plt.show()
 
 
@@ -581,6 +688,7 @@ __all__ = [
     "astar",
     "path_to_actions",
     "plot_path",
+    "plot_staged_path",
     "neighbors4",
     "astar_time_aware",
     "reserve_path",
