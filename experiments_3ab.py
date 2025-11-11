@@ -273,7 +273,18 @@ def plan_pickplace_naive_multi(
 
 # ---------- Analysis helpers: conflict timeline, wait gantt, A* fields ----------
 
-def conflict_timeline(paths: List[Optional[List[Tuple[int, int]]]]) -> Dict[str, List[int]]:
+def _cell_at_time(path: List[Optional[Tuple[int, int]]], t: int) -> Optional[Tuple[int, int]]:
+    if not path:
+        return None
+    if t < len(path) and path[t] is not None:
+        return path[t]
+    for idx in range(min(t, len(path) - 1), -1, -1):
+        if path[idx] is not None:
+            return path[idx]
+    return None
+
+
+def conflict_timeline(paths: List[Optional[List[Optional[Tuple[int, int]]]]]) -> Dict[str, List[int]]:
     tmax = 0
     for p in paths:
         if p:
@@ -285,9 +296,9 @@ def conflict_timeline(paths: List[Optional[List[Tuple[int, int]]]]) -> Dict[str,
         seen = {}
         vconf = 0
         for p in paths:
-            if not p or t >= len(p):
+            if not p:
                 continue
-            cell = p[t]
+            cell = _cell_at_time(p, t)
             seen.setdefault(cell, 0)
             seen[cell] += 1
         for c in seen.values():
@@ -298,10 +309,15 @@ def conflict_timeline(paths: List[Optional[List[Tuple[int, int]]]]) -> Dict[str,
         econ = 0
         segs = []
         for p in paths:
-            if not p or t + 1 >= len(p):
+            if not p:
                 segs.append(None)
             else:
-                segs.append((p[t], p[t + 1]))
+                u = _cell_at_time(p, t)
+                v = _cell_at_time(p, t + 1)
+                if u is None or v is None:
+                    segs.append(None)
+                else:
+                    segs.append((u, v))
         n = len(segs)
         for i in range(n):
             if segs[i] is None:
@@ -333,30 +349,42 @@ def plot_conflict_timeline(tl: Dict[str, List[int]], title: str = "Conflicts ove
     plt.show()
 
 
-def plot_wait_gantt(paths: List[Optional[List[Tuple[int, int]]]], title: str = "Wait vs Move (Gantt)") -> None:
+def plot_wait_gantt(paths: List[Optional[List[Optional[Tuple[int, int]]]]], title: str = "Wait vs Move (Gantt)") -> None:
     import matplotlib.pyplot as plt
     def segments_wait_move(p):
-        if not p or len(p) < 2:
-            return []
+        if not p:
+            return [], None
+        spawn = next((i for i, cell in enumerate(p) if cell is not None), None)
+        if spawn is None:
+            return [], None
         segs = []
         cur_type = None
-        start = 0
-        for i in range(1, len(p)):
-            typ = "wait" if p[i] == p[i-1] else "move"
+        start = spawn
+        prev = _cell_at_time(p, spawn)
+        if prev is None:
+            return [], None
+        for t in range(spawn + 1, len(p)):
+            cell = _cell_at_time(p, t)
+            if cell is None:
+                continue
+            typ = "wait" if cell == prev else "move"
             if cur_type is None:
                 cur_type = typ
-                start = i - 1
+                start = t - 1
             elif typ != cur_type:
-                segs.append((cur_type, start, i-1))
+                segs.append((cur_type, start, t - 1))
                 cur_type = typ
-                start = i - 1
-        segs.append((cur_type, start, len(p)-1))
-        return segs
+                start = t - 1
+            prev = cell
+        segs.append((cur_type or "wait", start, len(p) - 1))
+        return segs, spawn
     fig, ax = plt.subplots(figsize=(8.5, 0.6 * max(3, len(paths))))
     for idx, p in enumerate(paths):
-        offset = 0
-        for typ, s, e in segments_wait_move(p):
-            width = e - s
+        segs, spawn = segments_wait_move(p)
+        if spawn and spawn > 0:
+            ax.barh(idx, spawn, left=0, height=0.6, color="gray", alpha=0.25)
+        for typ, s, e in segs:
+            width = max(0, e - s)
             color = "tomato" if typ == "wait" else "deepskyblue"
             ax.barh(idx, width, left=s, height=0.6, color=color, alpha=0.9)
     ax.set_title(title)
@@ -369,7 +397,7 @@ def plot_wait_gantt(paths: List[Optional[List[Tuple[int, int]]]], title: str = "
 
 
 def list_conflicts(
-    paths: List[Optional[List[Tuple[int, int]]]],
+    paths: List[Optional[List[Optional[Tuple[int, int]]]]],
     limit: Optional[int] = None,
 ) -> List[Dict[str, object]]:
     """Enumerate vertex/edge conflicts for the given set of paths."""
@@ -380,17 +408,12 @@ def list_conflicts(
     if max_len == 0:
         return events
 
-    def cell_at(path: List[Tuple[int, int]], t: int) -> Tuple[int, int]:
-        if t < len(path):
-            return path[t]
-        return path[-1]
-
     for t in range(max_len):
         seen: Dict[Tuple[int, int], List[int]] = {}
         for idx, path in enumerate(paths):
             if not path:
                 continue
-            cell = cell_at(path, t)
+            cell = _cell_at_time(path, t)
             if cell is None:
                 continue
             seen.setdefault(cell, []).append(idx)
@@ -404,16 +427,16 @@ def list_conflicts(
             pi = paths[i]
             if not pi:
                 continue
-            u1 = cell_at(pi, t)
-            v1 = cell_at(pi, t + 1 if t + 1 < max_len else t)
+            u1 = _cell_at_time(pi, t)
+            v1 = _cell_at_time(pi, t + 1 if t + 1 < max_len else t)
             if u1 == v1 or u1 is None or v1 is None:
                 continue
             for j in range(i + 1, len(paths)):
                 pj = paths[j]
                 if not pj:
                     continue
-                u2 = cell_at(pj, t)
-                v2 = cell_at(pj, t + 1 if t + 1 < max_len else t)
+                u2 = _cell_at_time(pj, t)
+                v2 = _cell_at_time(pj, t + 1 if t + 1 < max_len else t)
                 if u2 == v2 or u2 is None or v2 is None:
                     continue
                 if u1 == v2 and v1 == u2:

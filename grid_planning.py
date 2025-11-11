@@ -320,7 +320,7 @@ def plot_staged_path(
 # A staged-style multi-agent plot, reusing plot_staged_path semantics
 def plot_multiagent_staged(
     nonfl: Dict[str, object],
-    paths: List[Optional[List[Tuple[int, int]]]],
+    paths: List[Optional[List[Optional[Tuple[int, int]]]]],
     labels: Optional[List[str]] = None,
     title: str = "Multi-agent plan (staged style)",
     annotate_every: int = 5,
@@ -344,16 +344,21 @@ def plot_multiagent_staged(
 
     segs: List[Dict[str, object]] = []
     for k, path in enumerate(paths):
-        if not path or len(path) < 2:
+        if not path:
+            continue
+        spawn = _first_real_index(path)
+        clean = [cell for cell in path if cell is not None]
+        if not clean or len(clean) < 2:
             continue
         label = labels[k] if labels and k < len(labels) else f"agent{k}"
         color = palette[k % len(palette)]
         off = _agent_offset(k)
         segs.append({
             "label": label,
-            "path": path,
+            "path": clean,
             "color": color,
             "offset": off,
+            "t_offset": spawn or 0,
         })
     if not segs:
         _require_matplotlib()
@@ -444,6 +449,7 @@ def plot_routes_unified(
             phase = seg.get("phase", "GEN")
             ls = seg.get("linestyle") or ls_for_phase.get(phase, "-")
             task_idx = seg.get("task", 0)
+            t_offset = int(seg.get("t_offset", 0) or 0)
             xs = [x + dx for (x, y) in path]
             ys = [y + dy for (x, y) in path]
             line = ax.plot(ys, xs, ls, linewidth=2.6, color=color, alpha=0.96)[0]
@@ -456,7 +462,7 @@ def plot_routes_unified(
                 if not annotate_every:
                     continue
                 if t in (0, len(path) - 1) or (t % annotate_every == 0):
-                    txt = f"A{aidx}T{task_idx}:{t}"
+                    txt = f"A{aidx}T{task_idx}:{t_offset + t}"
                     ax.text(
                         y + dy,
                         x + dx,
@@ -504,12 +510,19 @@ def animate_routes_unified_gif(
 
     # Compute per-agent concatenated lengths to decide total T
     def concat_len(segs: List[Dict[str, object]]) -> int:
-        total = 0
+        latest = 0
+        fallback = 0
         for seg in segs:
             p = seg.get("path") or []
-            if len(p) >= 2:
-                total += len(p) - 1
-        return total
+            if len(p) < 2:
+                continue
+            dur = len(p) - 1
+            start = seg.get("t_offset")
+            if start is None:
+                start = fallback
+            fallback = start + dur
+            latest = max(latest, start + dur)
+        return latest
 
     T = 0
     for segs in agents_segments:
@@ -551,6 +564,7 @@ def animate_routes_unified_gif(
                 color = palette[aidx % len(palette)]
                 dx, dy = _agent_offset(aidx)
                 elapsed = 0
+                last_end = 0
                 for seg in segs:
                     p = seg.get("path") or []
                     if len(p) < 2:
@@ -558,7 +572,13 @@ def animate_routes_unified_gif(
                     phase = seg.get("phase", "GEN")
                     ls = ls_for_phase.get(phase, "-")
                     Tseg = len(p) - 1
-                    upto = max(0, min(Tseg, t - elapsed))
+                    seg_start = seg.get("t_offset")
+                    if seg_start is None:
+                        seg_start = last_end
+                    last_end = seg_start + Tseg
+                    if t < seg_start:
+                        continue
+                    upto = max(0, min(Tseg, t - seg_start))
                     if upto > 0:
                         xs = [x + dx for (x, y) in p[: upto + 1]]
                         ys = [y + dy for (x, y) in p[: upto + 1]]
@@ -575,22 +595,20 @@ def animate_routes_unified_gif(
                             c=[color],
                             zorder=4,
                         )
-                        # sparse labels along the drawn part
-                        if annotate_every:
-                            for i in range(0, upto + 1):
-                                if i in (0, upto) or (i % annotate_every == 0):
-                                    x, y = p[i]
-                                    ax.text(
-                                        y + dy,
-                                        x + dx,
-                                        f"A{aidx}:{elapsed + i}",
-                                        color="white",
-                                        fontsize=8.5,
-                                        ha="center",
-                                        va="center",
-                                        path_effects=[pe.withStroke(linewidth=2.3, foreground="black")],
-                                    )
-                    elapsed += Tseg
+                        # annotate current head only
+                        if annotate_every and upto >= 0:
+                            x, y = p[upto]
+                            ax.text(
+                                y + dy,
+                                x + dx,
+                                f"A{aidx}:{seg_start + upto}",
+                                color="white",
+                                fontsize=8.5,
+                                ha="center",
+                                va="center",
+                                path_effects=[pe.withStroke(linewidth=2.3, foreground="black")],
+                            )
+                    elapsed = last_end
 
             if legend_items:
                 ax.legend(handles=legend_items, loc="upper left", bbox_to_anchor=(1.02, 0.42), framealpha=0.9)
@@ -717,7 +735,7 @@ def _agent_offset(k: int) -> Tuple[float, float]:
 
 def plot_multiple_paths_pretty_offset(
     nonfl: Dict[str, object],
-    paths: List[Optional[List[Tuple[int, int]]]],
+    paths: List[Optional[List[Optional[Tuple[int, int]]]]],
     starts: Optional[List[Tuple[int, int]]] = None,
     goals: Optional[List[Tuple[int, int]]] = None,
     title: str = "Multi-agent plan (offset)",
@@ -760,20 +778,26 @@ def plot_multiple_paths_pretty_offset(
     for k, path in enumerate(paths):
         if not path:
             continue
+        spawn = _first_real_index(path)
+        if spawn is None:
+            continue
+        clean = [cell for cell in path[spawn:] if cell is not None]
+        if not clean:
+            continue
         dx, dy = _agent_offset(k)
-        xs = [x + dx for (x, y) in path]
-        ys = [y + dy for (x, y) in path]
+        xs = [x + dx for (x, y) in clean]
+        ys = [y + dy for (x, y) in clean]
         ax.plot(ys, xs, linestyle="-", linewidth=2.0, alpha=0.95, label=f"agent {k}")
         ax.scatter(ys, xs, s=22, edgecolors="white", linewidths=0.8, zorder=3)
-        for t, (x, y) in enumerate(path):
-            white_text((x + dx, y + dy), f"{k}:{t}", fontsize=9)
+        for t, (x, y) in enumerate(clean):
+            white_text((x + dx, y + dy), f"{k}:{spawn + t}", fontsize=9)
     ax.legend(loc="upper right", framealpha=0.9)
     plt.show()
 
 
 def animate_paths_gif(
     nonfl: Dict[str, object],
-    paths: List[Optional[List[Tuple[int, int]]]],
+    paths: List[Optional[List[Optional[Tuple[int, int]]]]],
     starts: Optional[List[Tuple[int, int]]] = None,
     goals: Optional[List[Tuple[int, int]]] = None,
     out_gif: str = "multi_agent_playback.gif",
@@ -785,9 +809,20 @@ def animate_paths_gif(
     H, W = nonfl.get("H"), nonfl.get("W")
     grid = build_grid(nonfl)
     T = 0
+    spawn_times: List[Optional[int]] = []
+    trimmed: List[List[Tuple[int, int]]] = []
     for p in paths:
         if p:
             T = max(T, len(p) - 1)
+            spawn = _first_real_index(p)
+            spawn_times.append(spawn)
+            if spawn is None:
+                trimmed.append([])
+            else:
+                trimmed.append([cell for cell in p[spawn:] if cell is not None])
+        else:
+            spawn_times.append(None)
+            trimmed.append([])
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.set_xticks(range(W))
     ax.set_yticks(range(H))
@@ -839,20 +874,23 @@ def animate_paths_gif(
                         path_effects=[pe.withStroke(linewidth=2.5, foreground="black")],
                     )
 
-            for k, path in enumerate(paths):
-                if not path:
+            for k, path in enumerate(trimmed):
+                spawn = spawn_times[k]
+                if spawn is None or not path:
+                    continue
+                if t < spawn:
                     continue
                 dx, dy = _agent_offset(k)
-                upto = min(t + 1, len(path))
-                xs = [x + dx for (x, y) in path[:upto]]
-                ys = [y + dy for (x, y) in path[:upto]]
+                rel_t = min(len(path) - 1, t - spawn)
+                xs = [x + dx for (x, y) in path[: rel_t + 1]]
+                ys = [y + dy for (x, y) in path[: rel_t + 1]]
                 if len(xs) >= 2:
                     ax.plot(ys, xs, linestyle="-", linewidth=2.0, alpha=0.95, label=f"agent {k}" if t == 0 else None)
                 ax.scatter(ys[-1:], xs[-1:], s=28, edgecolors="white", linewidths=0.9, zorder=3)
                 ax.text(
                     ys[-1],
                     xs[-1],
-                    f"{k}:{upto-1}",
+                    f"{k}:{spawn + rel_t}",
                     color="white",
                     ha="center",
                     va="center",
@@ -892,19 +930,48 @@ def auto_pick_starts_goals(nonfl: Dict[str, object], k: int = 3, seed: int = 42,
     return starts, goals
 
 
-def path_length(path: Optional[List[Tuple[int, int]]]) -> Optional[int]:
+def _first_real_index(path: List[Optional[Tuple[int, int]]]) -> Optional[int]:
+    for idx, cell in enumerate(path):
+        if cell is not None:
+            return idx
+    return None
+
+
+def _last_real_cell(path: List[Optional[Tuple[int, int]]]) -> Optional[Tuple[int, int]]:
+    for cell in reversed(path):
+        if cell is not None:
+            return cell
+    return None
+
+
+def path_length(path: Optional[List[Optional[Tuple[int, int]]]]) -> Optional[int]:
     if not path:
         return None
-    return max(0, len(path) - 1)
+    spawn_idx = _first_real_index(path)
+    if spawn_idx is None:
+        return None
+    return max(0, len(path) - 1 - spawn_idx)
 
 
-def success(path: Optional[List[Tuple[int, int]]], goal: Tuple[int, int]) -> bool:
+def success(path: Optional[List[Optional[Tuple[int, int]]]], goal: Tuple[int, int]) -> bool:
     if not path:
         return False
-    return path[-1] == goal
+    last = _last_real_cell(path)
+    return last == goal
 
 
-def count_vertex_conflicts(paths: List[Optional[List[Tuple[int, int]]]]) -> int:
+def _cell_at_time(path: List[Optional[Tuple[int, int]]], t: int) -> Optional[Tuple[int, int]]:
+    if not path:
+        return None
+    if t < len(path) and path[t] is not None:
+        return path[t]
+    for idx in range(min(t, len(path) - 1), -1, -1):
+        if path[idx] is not None:
+            return path[idx]
+    return None
+
+
+def count_vertex_conflicts(paths: List[Optional[List[Optional[Tuple[int, int]]]]]) -> int:
     tmax = 0
     for p in paths:
         if p:
@@ -913,9 +980,11 @@ def count_vertex_conflicts(paths: List[Optional[List[Tuple[int, int]]]]) -> int:
     for t in range(tmax + 1):
         seen: Dict[Tuple[int, int], List[int]] = {}
         for i, p in enumerate(paths):
-            if not p or t >= len(p):
+            if not p:
                 continue
-            cell = p[t]
+            cell = _cell_at_time(p, t)
+            if cell is None:
+                continue
             seen.setdefault(cell, []).append(i)
         for agents in seen.values():
             if len(agents) > 1:

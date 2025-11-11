@@ -48,7 +48,7 @@ class CBSTreeNode:
     conflicts: int
     node_id: int
     constraints: Dict[int, List[Constraint]]
-    paths: List[Optional[List[Coord]]]
+    paths: List[Optional[List[Optional[Coord]]]]
     segments: List[List[Dict[str, object]]]
     depth: int = 0
 
@@ -89,7 +89,7 @@ def _plan_agent_with_constraints(
     task: Task,
     agent_constraints: Sequence[Constraint],
     t_max: int,
-) -> Tuple[Optional[List[Dict[str, object]]], Optional[List[Coord]]]:
+) -> Tuple[Optional[List[Dict[str, object]]], Optional[List[Optional[Coord]]]]:
     """Plan S->P->D for one agent under the given constraints."""
 
     (start_xy, pick_xy, drop_xy) = task
@@ -109,8 +109,9 @@ def _plan_agent_with_constraints(
     )
     if p1_raw is None:
         return None, None
-    p1_conflict = ([start_xy] * delay_steps) + p1_raw
-    p1_plot = ([start_xy] * delay_steps) + p1_raw
+    delay_padding: List[Optional[Coord]] = [None] * delay_steps
+    p1_conflict = delay_padding + p1_raw
+    p1_plot = p1_raw
 
     t_start2 = len(p1_conflict) - 1
     p2 = astar_time_aware(
@@ -128,21 +129,33 @@ def _plan_agent_with_constraints(
         return None, None
 
     segments = [
-        {"agent": agent_idx, "task": 0, "phase": "SP", "path": p1_plot},
-        {"agent": agent_idx, "task": 0, "phase": "PD", "path": p2},
+        {"agent": agent_idx, "task": 0, "phase": "SP", "path": p1_plot, "t_offset": delay_steps},
+        {
+            "agent": agent_idx,
+            "task": 0,
+            "phase": "PD",
+            "path": p2,
+            "t_offset": delay_steps + max(0, len(p1_raw) - 1),
+        },
     ]
     p2_conflict = p2
     merged_conflict = p1_conflict + p2_conflict[1:]
     return segments, merged_conflict
 
 
-def _cell_at(path: List[Coord], t: int) -> Coord:
+def _cell_at(path: List[Optional[Coord]], t: int) -> Optional[Coord]:
+    if not path:
+        return None
     if t < len(path):
-        return path[t]
-    return path[-1]
+        if path[t] is not None:
+            return path[t]
+    for idx in range(min(t, len(path) - 1), -1, -1):
+        if path[idx] is not None:
+            return path[idx]
+    return None
 
 
-def _detect_conflict(paths: List[Optional[List[Coord]]]) -> Optional[Dict[str, object]]:
+def _detect_conflict(paths: List[Optional[List[Optional[Coord]]]]) -> Optional[Dict[str, object]]:
     max_len = max((len(p) for p in paths if p), default=0)
     if max_len == 0:
         return None
@@ -197,12 +210,23 @@ def _constraint_from_conflict(agent: int, conflict: Dict[str, object]) -> Constr
     return Constraint(agent=agent, kind="edge", time=conflict["time"], edge=conflict[edge_key])
 
 
-def _cost_of_paths(paths: List[Optional[List[Coord]]], metric: str = "soc") -> int:
+def _first_real_index(path: List[Optional[Coord]]) -> Optional[int]:
+    for idx, cell in enumerate(path):
+        if cell is not None:
+            return idx
+    return None
+
+
+def _cost_of_paths(paths: List[Optional[List[Optional[Coord]]]], metric: str = "soc") -> int:
     lens = []
     for p in paths:
         if not p:
             return float("inf")
-        lens.append(max(0, len(p) - 1))
+        spawn_idx = _first_real_index(p)
+        if spawn_idx is None:
+            return float("inf")
+        effective = max(0, len(p) - 1 - spawn_idx)
+        lens.append(effective)
     if not lens:
         return float("inf")
     if metric.lower() == "makespan":
@@ -231,7 +255,7 @@ def run_cbs(
     n_agents = len(tasks)
     constraints: Dict[int, List[Constraint]] = {}
     segments: List[List[Dict[str, object]]] = []
-    paths: List[Optional[List[Coord]]] = []
+    paths: List[Optional[List[Optional[Coord]]]] = []
 
     if enforce_entry_queue and entry_queue_spacing > 0:
         start_counts: Dict[Coord, int] = {}
