@@ -618,6 +618,8 @@ def astar_time_aware(
     occupied_edges: Dict[int, set],
     t_start: int = 0,
     t_max: int = 512,
+    vertex_constraints: Optional[Dict[int, set]] = None,
+    edge_constraints: Optional[Dict[int, set]] = None,
 ) -> Optional[List[Tuple[int, int]]]:
     H, W = len(grid), len(grid[0])
     sx, sy = start_xy
@@ -630,7 +632,11 @@ def astar_time_aware(
     def is_free_vertex(x: int, y: int, t: int) -> bool:
         if not in_bounds(H, W, x, y) or grid[x][y] == 1:
             return False
-        return (t not in occupied_vertices) or ((x, y) not in occupied_vertices[t])
+        if t in occupied_vertices and (x, y) in occupied_vertices[t]:
+            return False
+        if vertex_constraints and t in vertex_constraints and (x, y) in vertex_constraints[t]:
+            return False
+        return True
 
     def is_free_edge(x1: int, y1: int, x2: int, y2: int, t: int) -> bool:
         pair = ((x1, y1), (x2, y2))
@@ -638,6 +644,8 @@ def astar_time_aware(
             return False
         opp = ((x2, y2), (x1, y1))
         if t in occupied_edges and opp in occupied_edges[t]:
+            return False
+        if edge_constraints and t in edge_constraints and pair in edge_constraints[t]:
             return False
         return True
 

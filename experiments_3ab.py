@@ -25,6 +25,7 @@ from grid_planning import (
     evaluate_multi_agent,
     auto_pick_starts_goals,
     animate_paths_gif,
+    free_cells,
 )
 from pickplace_utils import astar_with_footprint, plot_explored_heatmap, plot_heuristic_field, plot_open_touched_heatmap
 
@@ -166,6 +167,14 @@ __all__ = [
     "multi_agent_naive",
     "count_edge_conflicts",
     "run_3a_3b",
+    "sample_zone_tasks",
+    "plan_pickplace_naive_multi",
+    "plan_pickplace_prioritized_multi",
+    "conflict_timeline",
+    "plot_conflict_timeline",
+    "plot_wait_gantt",
+    "plot_constraint_timeline",
+    "list_conflicts",
 ]
 
 
@@ -194,8 +203,6 @@ def sample_zone_tasks(nonfl: Dict[str, object], k: int = 3, seed: int = 13) -> L
         return 0 <= x < H and 0 <= y < W and grid[x][y] == 0
 
     if not inbound or not packing or not outbound:
-        # Fallback: use free cells if zones missing
-        from grid_planning import free_cells
         import random as _r
         cells = [c for c in free_cells(nonfl) if is_free(c)]
         _r.Random(seed).shuffle(cells)
@@ -361,6 +368,66 @@ def plot_wait_gantt(paths: List[Optional[List[Tuple[int, int]]]], title: str = "
     plt.show()
 
 
+def list_conflicts(
+    paths: List[Optional[List[Tuple[int, int]]]],
+    limit: Optional[int] = None,
+) -> List[Dict[str, object]]:
+    """Enumerate vertex/edge conflicts for the given set of paths."""
+    events: List[Dict[str, object]] = []
+    if not paths:
+        return events
+    max_len = max((len(p) for p in paths if p), default=0)
+    if max_len == 0:
+        return events
+
+    def cell_at(path: List[Tuple[int, int]], t: int) -> Tuple[int, int]:
+        if t < len(path):
+            return path[t]
+        return path[-1]
+
+    for t in range(max_len):
+        seen: Dict[Tuple[int, int], List[int]] = {}
+        for idx, path in enumerate(paths):
+            if not path:
+                continue
+            cell = cell_at(path, t)
+            if cell is None:
+                continue
+            seen.setdefault(cell, []).append(idx)
+        for cell, agents in seen.items():
+            if len(agents) > 1:
+                events.append({"type": "vertex", "time": t, "cell": cell, "agents": tuple(agents)})
+                if limit and len(events) >= limit:
+                    return events
+
+        for i in range(len(paths)):
+            pi = paths[i]
+            if not pi:
+                continue
+            u1 = cell_at(pi, t)
+            v1 = cell_at(pi, t + 1 if t + 1 < max_len else t)
+            if u1 == v1 or u1 is None or v1 is None:
+                continue
+            for j in range(i + 1, len(paths)):
+                pj = paths[j]
+                if not pj:
+                    continue
+                u2 = cell_at(pj, t)
+                v2 = cell_at(pj, t + 1 if t + 1 < max_len else t)
+                if u2 == v2 or u2 is None or v2 is None:
+                    continue
+                if u1 == v2 and v1 == u2:
+                    events.append({
+                        "type": "edge",
+                        "time": t,
+                        "edge": (u1, v1),
+                        "agents": (i, j),
+                    })
+                    if limit and len(events) >= limit:
+                        return events
+    return events
+
+
 def summary_compare(result_obj: Dict[str, object]) -> Dict[str, Dict[str, object]]:
     from grid_planning import path_length
     def waits_in_path(path):
@@ -407,6 +474,59 @@ def analyze_astar_for_agent(nonfl: Dict[str, object], agents_segments: List[List
         plot_explored_heatmap(nonfl, fp2, title=f"{title_prefix}{agent_idx} | PD closed-order")
         plot_open_touched_heatmap(nonfl, fp2, title=f"{title_prefix}{agent_idx} | PD open-touched")
         plot_heuristic_field(nonfl, fp2, field="h")
+
+
+def plot_constraint_timeline(constraints: Dict[int, List[object]], title: str = "CBS constraint timeline", max_time: Optional[int] = None) -> None:
+    """Visualize per-agent delay/vertex/edge constraints on a timeline."""
+    if plt is None:
+        print("matplotlib unavailable; cannot plot constraint timeline.")
+        return
+    if not constraints:
+        print("No constraints to visualize.")
+        return
+    agents = sorted(constraints.keys())
+    fig, ax = plt.subplots(figsize=(8.5, 0.8 * max(2, len(agents))))
+    delay_shown = False
+    vertex_shown = False
+    edge_shown = False
+    for idx, agent in enumerate(agents):
+        cs = constraints.get(agent, []) or []
+        for c in cs:
+            kind = getattr(c, "kind", None)
+            time = getattr(c, "time", 0)
+            if kind == "delay":
+                width = max(0, time)
+                ax.barh(idx, width if width else 0.4, left=0, height=0.5, color="tab:blue", alpha=0.25, edgecolor="none")
+                delay_shown = True
+            elif kind == "vertex":
+                ax.scatter(time, idx, marker="s", color="tab:red", s=40)
+                vertex_shown = True
+            elif kind == "edge":
+                ax.scatter(time, idx, marker="x", color="black", s=40)
+                edge_shown = True
+    ax.set_title(title)
+    ax.set_xlabel("time step")
+    ax.set_ylabel("agent")
+    ax.set_yticks(range(len(agents)))
+    ax.set_yticklabels([f"A{a}" for a in agents])
+    if max_time is not None:
+        ax.set_xlim(-1, max_time + 1)
+    ax.grid(True, axis="x", alpha=0.2)
+    handles = []
+    labels = []
+    from matplotlib.patches import Patch
+    if delay_shown:
+        handles.append(Patch(facecolor="tab:blue", alpha=0.25, label="Delay"))
+        labels.append("Delay")
+    if vertex_shown:
+        handles.append(Patch(facecolor="tab:red", label="Vertex"))
+        labels.append("Vertex")
+    if edge_shown:
+        handles.append(Patch(facecolor="none", edgecolor="black", label="Edge"))
+        labels.append("Edge")
+    if handles:
+        ax.legend(handles, labels, loc="upper right")
+    plt.show()
 
 
 
