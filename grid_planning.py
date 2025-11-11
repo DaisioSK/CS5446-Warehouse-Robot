@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import heapq
 import random
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Set
 
 try:
     import matplotlib.patheffects as pe
@@ -39,6 +39,14 @@ def build_grid(nonfl: Dict[str, object]) -> List[List[int]]:
         if 0 <= x < H and 0 <= y < W:
             grid[x][y] = 1
     return grid
+
+
+def build_one_way_forbidden(nonfl: Dict[str, object]) -> Set[Tuple[Tuple[int, int], Tuple[int, int]]]:
+    blocked: Set[Tuple[Tuple[int, int], Tuple[int, int]]] = set()
+    for edge in nonfl.get("one_way_edges", []) or []:
+        src, dst = edge
+        blocked.add((dst, src))
+    return blocked
 
 
 def _draw_one_way_edges(ax, edges):
@@ -153,7 +161,12 @@ def manhattan(a: Tuple[int, int], b: Tuple[int, int]) -> int:
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 
-def astar(grid: List[List[int]], start: Tuple[int, int], goal: Tuple[int, int]) -> Optional[List[Tuple[int, int]]]:
+def astar(
+    grid: List[List[int]],
+    start: Tuple[int, int],
+    goal: Tuple[int, int],
+    forbidden_edges: Optional[Set[Tuple[Tuple[int, int], Tuple[int, int]]]] = None,
+) -> Optional[List[Tuple[int, int]]]:
     H, W = len(grid), len(grid[0])
     if not (in_bounds(H, W, start[0], start[1]) and in_bounds(H, W, goal[0], goal[1])):
         return None
@@ -176,6 +189,8 @@ def astar(grid: List[List[int]], start: Tuple[int, int], goal: Tuple[int, int]) 
             return list(reversed(path))
         cx, cy = cur
         for nx, ny, _ in neighbors(grid, cx, cy):
+            if forbidden_edges and ((cx, cy), (nx, ny)) in forbidden_edges:
+                continue
             ng = g[cur] + 1
             if (nx, ny) not in g or ng < g[(nx, ny)]:
                 g[(nx, ny)] = ng
@@ -540,6 +555,29 @@ def animate_routes_unified_gif(
     ls_for_phase = {"SP": "--", "PD": "-", "GEN": "-"}
     head_markers = ["o", "^", "s", "X", "D", "P"]  # circle, triangle, square, cross, diamond, plus-filled
 
+    agent_task_windows: List[Dict[int, Dict[str, int]]] = []
+    for segs in agents_segments:
+        windows: Dict[int, Dict[str, int]] = {}
+        fallback = 0
+        for seg in segs:
+            path = seg.get("path") or []
+            if len(path) < 2:
+                continue
+            seg_start = seg.get("t_offset")
+            if seg_start is None:
+                seg_start = fallback
+            seg_end = seg_start + len(path) - 1
+            fallback = seg_end
+            task_idx = seg.get("task", 0)
+            info = windows.setdefault(task_idx, {"start": seg_start, "end": seg_end})
+            info["start"] = min(info["start"], seg_start)
+            info["end"] = max(info["end"], seg_end)
+        if windows:
+            last_task = max(windows.keys())
+            for task_idx, info in windows.items():
+                info["display_end"] = T if task_idx == last_task else info["end"]
+        agent_task_windows.append(windows)
+
     fig, ax = plt.subplots(figsize=figsize)
     writer = PillowWriter(fps=fps)
     with writer.saving(fig, out_gif, dpi=120):
@@ -565,6 +603,7 @@ def animate_routes_unified_gif(
                 dx, dy = _agent_offset(aidx)
                 elapsed = 0
                 last_end = 0
+                windows = agent_task_windows[aidx]
                 for seg in segs:
                     p = seg.get("path") or []
                     if len(p) < 2:
@@ -576,18 +615,25 @@ def animate_routes_unified_gif(
                     if seg_start is None:
                         seg_start = last_end
                     last_end = seg_start + Tseg
-                    if t < seg_start:
+                    task_idx = seg.get("task", 0)
+                    window = windows.get(task_idx)
+                    if not window:
+                        continue
+                    display_end = window.get("display_end", seg_start + Tseg)
+                    if t < seg_start or t > display_end:
                         continue
                     upto = max(0, min(Tseg, t - seg_start))
-                    if upto > 0:
-                        xs = [x + dx for (x, y) in p[: upto + 1]]
-                        ys = [y + dy for (x, y) in p[: upto + 1]]
-                        ax.plot(ys, xs, ls, linewidth=2.6, color=color, alpha=0.96)
-                        # draw agent head at current position with distinctive marker
+                    xs = [x + dx for (x, y) in p[: upto + 1]]
+                    ys = [y + dy for (x, y) in p[: upto + 1]]
+                    ax.plot(ys, xs, ls, linewidth=2.6, color=color, alpha=0.96)
+
+                    is_active = seg_start <= t <= seg_start + Tseg
+                    if is_active:
+                        head_x, head_y = p[upto]
                         m = head_markers[aidx % len(head_markers)]
                         ax.scatter(
-                            ys[-1:],
-                            xs[-1:],
+                            [head_y + dy],
+                            [head_x + dx],
                             s=70,
                             marker=m,
                             edgecolors="white",
@@ -595,12 +641,10 @@ def animate_routes_unified_gif(
                             c=[color],
                             zorder=4,
                         )
-                        # annotate current head only
-                        if annotate_every and upto >= 0:
-                            x, y = p[upto]
+                        if annotate_every:
                             ax.text(
-                                y + dy,
-                                x + dx,
+                                head_y + dy,
+                                head_x + dx,
                                 f"A{aidx}:{seg_start + upto}",
                                 color="white",
                                 fontsize=8.5,
@@ -638,6 +682,7 @@ def astar_time_aware(
     t_max: int = 512,
     vertex_constraints: Optional[Dict[int, set]] = None,
     edge_constraints: Optional[Dict[int, set]] = None,
+    forbidden_edges: Optional[Set[Tuple[Tuple[int, int], Tuple[int, int]]]] = None,
 ) -> Optional[List[Tuple[int, int]]]:
     H, W = len(grid), len(grid[0])
     sx, sy = start_xy
@@ -664,6 +709,8 @@ def astar_time_aware(
         if t in occupied_edges and opp in occupied_edges[t]:
             return False
         if edge_constraints and t in edge_constraints and pair in edge_constraints[t]:
+            return False
+        if forbidden_edges and pair in forbidden_edges:
             return False
         return True
 
@@ -714,12 +761,22 @@ def multi_agent_sequential(
     starts: List[Tuple[int, int]],
     goals: List[Tuple[int, int]],
     t_max: int = 512,
+    forbidden_edges: Optional[Set[Tuple[Tuple[int, int], Tuple[int, int]]]] = None,
 ) -> List[Optional[List[Tuple[int, int]]]]:
     occupied_vertices: Dict[int, set] = {}
     occupied_edges: Dict[int, set] = {}
     plans: List[Optional[List[Tuple[int, int]]]] = []
     for s, g in zip(starts, goals):
-        path = astar_time_aware(grid, s, g, occupied_vertices, occupied_edges, t_start=0, t_max=t_max)
+        path = astar_time_aware(
+            grid,
+            s,
+            g,
+            occupied_vertices,
+            occupied_edges,
+            t_start=0,
+            t_max=t_max,
+            forbidden_edges=forbidden_edges,
+        )
         if path is None:
             plans.append(None)
         else:
@@ -1039,6 +1096,7 @@ def multi_agent_demo(nonfl: Dict[str, object], k: int = 3, seed: int = 13, title
 __all__ = [
     "ACTIONS",
     "build_grid",
+    "build_one_way_forbidden",
     "plot_grid",
     "in_bounds",
     "neighbors",

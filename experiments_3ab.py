@@ -6,7 +6,7 @@ existing modules, and default to the enhanced 10x15 environment.
 """
 
 from __future__ import annotations
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union, Set
 
 try:
     import matplotlib.pyplot as plt  # noqa: F401
@@ -26,6 +26,7 @@ from grid_planning import (
     auto_pick_starts_goals,
     animate_paths_gif,
     free_cells,
+    build_one_way_forbidden,
 )
 from pickplace_utils import astar_with_footprint, plot_explored_heatmap, plot_heuristic_field, plot_open_touched_heatmap
 
@@ -34,11 +35,12 @@ def multi_agent_naive(
     grid: List[List[int]],
     starts: List[Tuple[int, int]],
     goals: List[Tuple[int, int]],
+    forbidden_edges: Optional[Set[Tuple[Tuple[int, int], Tuple[int, int]]]] = None,
 ) -> List[Optional[List[Tuple[int, int]]]]:
     """Plan each agent independently with static A* (ignoring others)."""
     plans: List[Optional[List[Tuple[int, int]]]] = []
     for s, g in zip(starts, goals):
-        plans.append(astar(grid, s, g))
+        plans.append(astar(grid, s, g, forbidden_edges=forbidden_edges))
     return plans
 
 
@@ -87,6 +89,7 @@ def run_3a_3b(
     """
     nonfl = nonfl or make_enhanced_nonfl()
     grid = build_grid(nonfl)
+    forbidden_edges = build_one_way_forbidden(nonfl)
 
     # Sample tasks from zones: inbound -> packing -> outbound
     tasks = sample_zone_tasks(nonfl, k=k_agents, seed=seed)
@@ -94,12 +97,12 @@ def run_3a_3b(
     goals = [d for (_, _, d) in tasks]
 
     # 3A: naive independent A*
-    naive_segments, plans_naive = plan_pickplace_naive_multi(grid, tasks)
+    naive_segments, plans_naive = plan_pickplace_naive_multi(grid, tasks, forbidden_edges=forbidden_edges)
     metrics_naive = evaluate_multi_agent(grid, starts, goals, plans_naive)
     metrics_naive["edge_conflicts"] = count_edge_conflicts(plans_naive)
 
     # 3B: prioritized sequential with time-aware reservations
-    prio_segments, plans_prio = plan_pickplace_prioritized_multi(grid, tasks, t_max=t_max)
+    prio_segments, plans_prio = plan_pickplace_prioritized_multi(grid, tasks, t_max=t_max, forbidden_edges=forbidden_edges)
     metrics_prio = evaluate_multi_agent(grid, starts, goals, plans_prio)
     metrics_prio["edge_conflicts"] = count_edge_conflicts(plans_prio)
 
@@ -180,17 +183,23 @@ __all__ = [
 
 # ---------- New helpers for zone-based tasks and staged planning ----------
 
-def sample_zone_tasks(nonfl: Dict[str, object], k: int = 3, seed: int = 13) -> List[Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int]]]:
-    """Sample S (inbound), P (packing), D (outbound) triples per agent from zones.
+def sample_zone_tasks(
+    nonfl: Dict[str, object],
+    k: int = 3,
+    seed: int = 13,
+    tasks_per_agent: int = 1,
+) -> Union[List[Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int]]], List[List[Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int]]]]]:
+    """Sample per-agent task sequences from inbound/packing/outbound zones.
 
-    - Prefer no replacement by cycling shuffled lists (更少重复)
-    - Ensure sampled cells are free in grid (zone cells被障碍膨胀覆盖的情况会被跳过)
-    - Try to avoid identical triples across agents
+    When ``tasks_per_agent`` is 1 (default), behaves like the original helper and
+    returns a flat ``List[Task]``. For ``tasks_per_agent > 1``, each agent gets a
+    sequential list of Task tuples ``[ (S1,P1,D1), (S2,P2,D2), ... ]`` where the
+    start of stage-n+1 is the previous stage's drop (agent stays in-system).
     """
     zones = nonfl.get("zones") or {}
     inbound = list(zones.get("inbound", []))
-    packing = list(zones.get("packing", []))
-    outbound = list(zones.get("outbound", []))
+    packing_zone = list(zones.get("packing", []))
+    outbound_zone = list(zones.get("outbound", []))
 
     from grid_planning import build_grid
     grid = build_grid(nonfl)
@@ -202,7 +211,7 @@ def sample_zone_tasks(nonfl: Dict[str, object], k: int = 3, seed: int = 13) -> L
         x, y = xy
         return 0 <= x < H and 0 <= y < W and grid[x][y] == 0
 
-    if not inbound or not packing or not outbound:
+    if not inbound or not packing_zone or not outbound_zone:
         import random as _r
         cells = [c for c in free_cells(nonfl) if is_free(c)]
         _r.Random(seed).shuffle(cells)
@@ -212,10 +221,12 @@ def sample_zone_tasks(nonfl: Dict[str, object], k: int = 3, seed: int = 13) -> L
             p = cells[(i + k) % len(cells)]
             d = cells[(i + 2 * k) % len(cells)]
             triples.append((s, p, d))
-        return triples
+        return triples if tasks_per_agent == 1 else [[t] for t in triples]
 
     import random as _r
     rnd = _r.Random(seed)
+    packing = packing_zone[:]
+    outbound = outbound_zone[:]
     rnd.shuffle(inbound)
     rnd.shuffle(packing)
     rnd.shuffle(outbound)
@@ -244,12 +255,29 @@ def sample_zone_tasks(nonfl: Dict[str, object], k: int = 3, seed: int = 13) -> L
         used.add(triple)
         triples.append(triple)
         i += 1
-    return triples
+    if tasks_per_agent == 1:
+        return triples
+
+    # Build sequential task lists per agent (reuse packing/outbound pools).
+    packing_pool = [cell for cell in packing_zone if is_free(cell)] or packing_zone[:]
+    outbound_pool = [cell for cell in outbound_zone if is_free(cell)] or outbound_zone[:]
+    if not packing_pool or not outbound_pool:
+        raise RuntimeError("Packing or outbound zones unavailable for multi-task sampling")
+
+    sequences = [[task] for task in triples]
+    for stage_idx in range(1, tasks_per_agent):
+        for agent_idx in range(k):
+            start_xy = sequences[agent_idx][-1][2]
+            pick_xy = rnd.choice(packing_pool)
+            drop_xy = rnd.choice(outbound_pool)
+            sequences[agent_idx].append((start_xy, pick_xy, drop_xy))
+    return sequences
 
 
 def plan_pickplace_naive_multi(
     grid: List[List[int]],
     tasks: List[Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int]]],
+    forbidden_edges: Optional[Set[Tuple[Tuple[int, int], Tuple[int, int]]]] = None,
 ) -> Tuple[List[List[Dict[str, object]]], List[Optional[List[Tuple[int, int]]]]]:
     """Plan S->P and P->D independently for each agent (no interaction).
 
@@ -258,8 +286,8 @@ def plan_pickplace_naive_multi(
     agents_segments: List[List[Dict[str, object]]] = []
     merged: List[Optional[List[Tuple[int, int]]]] = []
     for aidx, (s, p, d) in enumerate(tasks):
-        p1 = astar(grid, s, p)
-        p2 = astar(grid, p, d)
+        p1 = astar(grid, s, p, forbidden_edges=forbidden_edges)
+        p2 = astar(grid, p, d, forbidden_edges=forbidden_edges)
         agents_segments.append([
             {"agent": aidx, "task": 0, "phase": "SP", "path": p1},
             {"agent": aidx, "task": 0, "phase": "PD", "path": p2},
@@ -557,6 +585,7 @@ def plan_pickplace_prioritized_multi(
     grid: List[List[int]],
     tasks: List[Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int]]],
     t_max: int = 512,
+    forbidden_edges: Optional[Set[Tuple[Tuple[int, int], Tuple[int, int]]]] = None,
 ) -> Tuple[List[List[Dict[str, object]]], List[Optional[List[Tuple[int, int]]]]]:
     """Sequential reservation planning with time-aware A* per segment.
 
@@ -568,7 +597,7 @@ def plan_pickplace_prioritized_multi(
     agents_segments: List[List[Dict[str, object]]] = []
     merged: List[Optional[List[Tuple[int, int]]]] = []
     for aidx, (s, p, d) in enumerate(tasks):
-        p1 = astar_time_aware(grid, s, p, occ_v, occ_e, t_start=0, t_max=t_max)
+        p1 = astar_time_aware(grid, s, p, occ_v, occ_e, t_start=0, t_max=t_max, forbidden_edges=forbidden_edges)
         if p1 is None:
             agents_segments.append([
                 {"agent": aidx, "task": 0, "phase": "SP", "path": None},
@@ -578,7 +607,7 @@ def plan_pickplace_prioritized_multi(
             continue
         reserve_path(occ_v, occ_e, p1)
         t_start2 = len(p1) - 1
-        p2 = astar_time_aware(grid, p, d, occ_v, occ_e, t_start=t_start2, t_max=t_max)
+        p2 = astar_time_aware(grid, p, d, occ_v, occ_e, t_start=t_start2, t_max=t_max, forbidden_edges=forbidden_edges)
         if p2 is not None:
             reserve_path(occ_v, occ_e, p2)
         agents_segments.append([

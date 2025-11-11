@@ -11,13 +11,14 @@ from __future__ import annotations
 import heapq
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union, Set
 
 from custom_layouts import make_enhanced_nonfl
-from grid_planning import astar_time_aware, build_grid
+from grid_planning import astar_time_aware, build_grid, build_one_way_forbidden
 
 Coord = Tuple[int, int]
 Task = Tuple[Coord, Coord, Coord]  # (start, pick, drop)
+AgentTaskSpec = Union[Task, Sequence[Task]]
 
 
 @dataclass(frozen=True)
@@ -86,61 +87,80 @@ def _delay_from_constraints(constraints: Sequence[Constraint]) -> int:
 def _plan_agent_with_constraints(
     agent_idx: int,
     grid: List[List[int]],
-    task: Task,
+    tasks: Sequence[Task],
     agent_constraints: Sequence[Constraint],
     t_max: int,
+    forbidden_edges: Optional[Set[Tuple[Coord, Coord]]] = None,
 ) -> Tuple[Optional[List[Dict[str, object]]], Optional[List[Optional[Coord]]]]:
-    """Plan S->P->D for one agent under the given constraints."""
+    """Plan sequential S->P->D stages for one agent under the given constraints."""
 
-    (start_xy, pick_xy, drop_xy) = task
+    if not tasks:
+        return None, None
+
     v_map, e_map = _constraint_maps(agent_constraints)
     delay_steps = _delay_from_constraints(agent_constraints)
+    merged_path: List[Optional[Coord]] = [None] * delay_steps
+    current_time = delay_steps
+    segments: List[Dict[str, object]] = []
 
-    p1_raw = astar_time_aware(
-        grid,
-        start_xy,
-        pick_xy,
-        occupied_vertices={},
-        occupied_edges={},
-        t_start=delay_steps,
-        t_max=t_max,
-        vertex_constraints=v_map,
-        edge_constraints=e_map,
-    )
-    if p1_raw is None:
-        return None, None
-    delay_padding: List[Optional[Coord]] = [None] * delay_steps
-    p1_conflict = delay_padding + p1_raw
-    p1_plot = p1_raw
+    for stage_idx, (start_xy, pick_xy, drop_xy) in enumerate(tasks):
+        p1_raw = astar_time_aware(
+            grid,
+            start_xy,
+            pick_xy,
+            occupied_vertices={},
+            occupied_edges={},
+            t_start=current_time,
+            t_max=t_max,
+            vertex_constraints=v_map,
+            edge_constraints=e_map,
+            forbidden_edges=forbidden_edges,
+        )
+        if p1_raw is None:
+            return None, None
 
-    t_start2 = len(p1_conflict) - 1
-    p2 = astar_time_aware(
-        grid,
-        pick_xy,
-        drop_xy,
-        occupied_vertices={},
-        occupied_edges={},
-        t_start=t_start2,
-        t_max=t_max,
-        vertex_constraints=v_map,
-        edge_constraints=e_map,
-    )
-    if p2 is None:
-        return None, None
-
-    segments = [
-        {"agent": agent_idx, "task": 0, "phase": "SP", "path": p1_plot, "t_offset": delay_steps},
-        {
+        segments.append({
             "agent": agent_idx,
-            "task": 0,
+            "task": stage_idx,
+            "phase": "SP",
+            "path": p1_raw,
+            "t_offset": current_time,
+        })
+
+        if len(merged_path) == current_time:
+            merged_path.extend(p1_raw)
+        else:
+            merged_path.extend(p1_raw[1:])
+
+        current_time = len(merged_path) - 1
+
+        p2 = astar_time_aware(
+            grid,
+            pick_xy,
+            drop_xy,
+            occupied_vertices={},
+            occupied_edges={},
+            t_start=current_time,
+            t_max=t_max,
+            vertex_constraints=v_map,
+            edge_constraints=e_map,
+            forbidden_edges=forbidden_edges,
+        )
+        if p2 is None:
+            return None, None
+
+        segments.append({
+            "agent": agent_idx,
+            "task": stage_idx,
             "phase": "PD",
             "path": p2,
-            "t_offset": delay_steps + max(0, len(p1_raw) - 1),
-        },
-    ]
-    p2_conflict = p2
-    merged_conflict = p1_conflict + p2_conflict[1:]
-    return segments, merged_conflict
+            "t_offset": current_time,
+        })
+
+        merged_path.extend(p2[1:])
+        current_time = len(merged_path) - 1
+
+    return segments, merged_path
 
 
 def _cell_at(path: List[Optional[Coord]], t: int) -> Optional[Coord]:
@@ -235,7 +255,7 @@ def _cost_of_paths(paths: List[Optional[List[Optional[Coord]]]], metric: str = "
 
 
 def run_cbs(
-    tasks: List[Task],
+    tasks: List[AgentTaskSpec],
     nonfl: Optional[Dict[str, object]] = None,
     grid: Optional[List[List[int]]] = None,
     t_max: int = 256,
@@ -251,16 +271,18 @@ def run_cbs(
         nonfl = make_enhanced_nonfl()
     if grid is None:
         grid = build_grid(nonfl)
+    forbidden_edges = build_one_way_forbidden(nonfl) if nonfl else None
 
-    n_agents = len(tasks)
+    agent_tasks = _normalize_agent_tasks(tasks)
+    n_agents = len(agent_tasks)
     constraints: Dict[int, List[Constraint]] = {}
     segments: List[List[Dict[str, object]]] = []
     paths: List[Optional[List[Optional[Coord]]]] = []
 
     if enforce_entry_queue and entry_queue_spacing > 0:
         start_counts: Dict[Coord, int] = {}
-        for agent_idx, task in enumerate(tasks):
-            start = task[0]
+        for agent_idx, seq in enumerate(agent_tasks):
+            start = seq[0][0]
             delay = start_counts.get(start, 0) * entry_queue_spacing
             start_counts[start] = start_counts.get(start, 0) + 1
             if delay > 0:
@@ -268,8 +290,15 @@ def run_cbs(
                     Constraint(agent=agent_idx, kind="delay", time=delay)
                 )
 
-    for agent_idx, task in enumerate(tasks):
-        segs, path = _plan_agent_with_constraints(agent_idx, grid, task, constraints.get(agent_idx, []), t_max)
+    for agent_idx, seq in enumerate(agent_tasks):
+        segs, path = _plan_agent_with_constraints(
+            agent_idx,
+            grid,
+            seq,
+            constraints.get(agent_idx, []),
+            t_max,
+            forbidden_edges=forbidden_edges,
+        )
         segments.append(segs or [])
         paths.append(path)
     root_cost = _cost_of_paths(paths, metric=cost_metric)
@@ -310,7 +339,7 @@ def run_cbs(
                 "paths": node.paths,
                 "segments": node.segments,
                 "constraints": node.constraints,
-                "tasks": tasks,
+                "tasks": agent_tasks,
                 "nonfl": nonfl,
                 "grid": grid,
                 "cost": node.cost,
@@ -330,7 +359,7 @@ def run_cbs(
                 "paths": best_node.paths if best_node else None,
                 "segments": best_node.segments if best_node else None,
                 "constraints": best_node.constraints if best_node else {},
-                "tasks": tasks,
+                "tasks": agent_tasks,
                 "nonfl": nonfl,
                 "grid": grid,
                 "cost": _cost_of_paths(best_node.paths, metric=cost_metric) if best_node else float("inf"),
@@ -343,9 +372,10 @@ def run_cbs(
         for agent in conflict["agents"]:
             existing = node.constraints.get(agent, [])
             branch_constraints = [_constraint_from_conflict(agent, conflict)]
+            agent_start = agent_tasks[agent][0][0]
             if (
                 conflict["type"] == "vertex"
-                and conflict.get("cell") == tasks[agent][0]
+                and conflict.get("cell") == agent_start
             ):
                 current_delay = _delay_from_constraints(existing)
                 delay_target = max(current_delay, conflict["time"] + 1)
@@ -357,7 +387,14 @@ def run_cbs(
 
                 if verbose and (stats["expanded"] <= 20 or stats["expanded"] % 1000 == 0):
                     log(f"  |- branch on agent {agent} with constraint {new_constraint}")
-                segs, path = _plan_agent_with_constraints(agent, grid, tasks[agent], new_constraints[agent], t_max)
+                segs, path = _plan_agent_with_constraints(
+                    agent,
+                    grid,
+                    agent_tasks[agent],
+                    new_constraints[agent],
+                    t_max,
+                    forbidden_edges=forbidden_edges,
+                )
                 if path is None:
                     if verbose and (stats["expanded"] <= 20 or stats["expanded"] % 1000 == 0):
                         log("     infeasible branch (no path)")
@@ -398,7 +435,7 @@ def run_cbs(
         "paths": best_node.paths if best_node else None,
         "segments": best_node.segments if best_node else None,
         "constraints": best_node.constraints if best_node else {},
-        "tasks": tasks,
+        "tasks": agent_tasks,
         "nonfl": nonfl,
         "grid": grid,
         "cost": _cost_of_paths(best_node.paths, metric=cost_metric) if best_node else float("inf"),
@@ -414,3 +451,11 @@ __all__ = [
     "CBSSearchError",
     "run_cbs",
 ]
+def _normalize_agent_tasks(tasks: Sequence[AgentTaskSpec]) -> List[List[Task]]:
+    normalized: List[List[Task]] = []
+    for entry in tasks:
+        if isinstance(entry, tuple) and len(entry) == 3:
+            normalized.append([entry])
+        else:
+            normalized.append(list(entry))
+    return normalized

@@ -21,7 +21,7 @@ try:
 except ImportError:  # pragma: no cover - plotting disabled outside notebook env
     pe = plt = PillowWriter = None
 
-from grid_planning import astar, build_grid, free_cells
+from grid_planning import astar, build_grid, free_cells, build_one_way_forbidden
 from rddl_utils import read_text
 
 
@@ -96,8 +96,9 @@ def plan_pick_and_drop(
     drop_xy: Tuple[int, int],
 ) -> Tuple[Optional[List[Tuple[int, int]]], Optional[List[Tuple[int, int]]]]:
     grid = build_grid(nonfl)
-    p1 = astar(grid, start_xy, pick_xy)
-    p2 = astar(grid, pick_xy, drop_xy)
+    forbidden = build_one_way_forbidden(nonfl)
+    p1 = astar(grid, start_xy, pick_xy, forbidden_edges=forbidden)
+    p2 = astar(grid, pick_xy, drop_xy, forbidden_edges=forbidden)
     return p1, p2
 
 
